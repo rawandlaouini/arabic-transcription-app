@@ -38,12 +38,18 @@ if (!fs.existsSync("downloads")) {
   console.log("Creating downloads directory");
 }
 
+// Serve generated files
+app.use("/downloads", express.static(path.join(__dirname, "downloads")));
+
 // JWT Secret (store in .env for production)
 const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
 
 // Google Client ID (store in .env for production)
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "201334161885-7qktheuftruukg492deg3ugl2m0u0g61.apps.googleusercontent.com";
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
+
+// Base URL for the server (for production, use Render domain)
+const BASE_URL = process.env.BASE_URL || "https://arabic-transcription-app.onrender.com";
 
 // Middleware to verify JWT token
 const authenticateToken = (req, res, next) => {
@@ -371,15 +377,13 @@ app.post("/generate-file", authenticateToken, async (req, res) => {
     );
     if (stderr) throw new Error(stderr);
     const outputFile = stdout.trim();
-    res.json({ fileUrl: `http://localhost:8000/downloads/${path.basename(outputFile)}` });
+    const fileUrl = `${BASE_URL}/downloads/${path.basename(outputFile)}`;
+    res.json({ fileUrl });
   } catch (error) {
     console.error("File generation error:", error);
     res.status(500).json({ error: "File generation error: " + error.message });
   }
 });
-
-// Serve generated files
-app.use("/downloads", express.static(path.join(__dirname, "downloads")));
 
 app.listen(8000, () => {
   console.log("Backend server running on http://localhost:8000");
