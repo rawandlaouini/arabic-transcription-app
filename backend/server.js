@@ -48,8 +48,10 @@ const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "201334161885-7qktheuftruukg492deg3ugl2m0u0g61.apps.googleusercontent.com";
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
-// Base URL for the server (for production, use Render domain)
-const BASE_URL = process.env.BASE_URL || "https://arabic-transcription-app.onrender.com";
+// Base URL for the server (dynamic based on environment)
+const BASE_URL = process.env.NODE_ENV === "production" 
+  ? process.env.BASE_URL || "https://arabic-transcription-app.onrender.com"
+  : "http://localhost:8000";
 
 // Middleware to verify JWT token
 const authenticateToken = (req, res, next) => {
@@ -145,22 +147,19 @@ app.post("/google-login", async (req, res) => {
     const email = payload.email;
     const googleId = payload.sub;
 
-    // Check if user exists in the database
     db.get("SELECT * FROM users WHERE email = ?", [email], async (err, user) => {
       if (err) {
         return res.status(500).json({ error: "Database error" });
       }
 
       if (user) {
-        // User exists, generate JWT token
         const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, {
           expiresIn: "1h",
         });
         return res.json({ token });
       }
 
-      // User doesn't exist, create a new user
-      const hashedPassword = await bcrypt.hash(googleId, 10); // Use Google ID as password
+      const hashedPassword = await bcrypt.hash(googleId, 10);
       db.run(
         "INSERT INTO users (email, password) VALUES (?, ?)",
         [email, hashedPassword],
@@ -201,10 +200,10 @@ app.post("/transcribe", authenticateToken, upload.single("audio"), async (req, r
         .outputOptions([
           "-f segment",
           "-segment_time 20",
-          "-c:a mp3", // Explicitly encode as MP3
-          "-ar 16000", // Ensure 16kHz sampling rate
-          "-ac 1", // Mono channel
-          "-vn", // No video
+          "-c:a mp3",
+          "-ar 16000",
+          "-ac 1",
+          "-vn",
         ])
         .output(path.join(outputDir, "chunk_%03d.mp3"))
         .on("end", () => {
@@ -223,7 +222,6 @@ app.post("/transcribe", authenticateToken, upload.single("audio"), async (req, r
     return res.end();
   }
 
-  // Get list of chunks and validate
   const chunks = fs.readdirSync(outputDir).filter(file => file.endsWith(".mp3"));
   const totalChunks = chunks.length;
   let transcriptions = [];
@@ -235,19 +233,17 @@ app.post("/transcribe", authenticateToken, upload.single("audio"), async (req, r
 
   console.log(`Total chunks generated: ${totalChunks}`);
 
-  // Transcribe each chunk with Hugging Face API
+  // Transcribe each chunk with the Colab API
   for (let i = 0; i < totalChunks; i++) {
     const chunkPath = path.join(outputDir, chunks[i]);
 
-    // Validate chunk file
     try {
       const stats = fs.statSync(chunkPath);
-      if (stats.size < 1000) { // Minimum size check (1KB)
+      if (stats.size < 1000) {
         console.warn(`Chunk ${i} is too small (${stats.size} bytes), skipping...`);
         continue;
       }
 
-      // Additional validation: Check if the file is a valid audio file using ffprobe
       await new Promise((resolve, reject) => {
         ffmpeg.ffprobe(chunkPath, (err, metadata) => {
           if (err || !metadata.format.duration) {
@@ -271,38 +267,39 @@ app.post("/transcribe", authenticateToken, upload.single("audio"), async (req, r
     while (retries > 0 && !success) {
       try {
         const audioData = fs.readFileSync(chunkPath);
+        console.log(`Chunk ${i} audio data length: ${audioData.length} bytes`);
+
+        const FormData = require('form-data');
+        const form = new FormData();
+        form.append('audio', audioData, { filename: `chunk_${i}.mp3`, contentType: 'audio/mpeg' });
+
         const response = await axios.post(
-          "https://api-inference.huggingface.co/models/RawandLaouini/whisper-medium-ar-finetuned-v6-colab",
-          audioData,
+          process.env.NGROK_URL,
+          form,
           {
             headers: {
-              Authorization: `Bearer ${process.env.HF_API_TOKEN}`,
-              "Content-Type": "audio/mpeg",
+              ...form.getHeaders(),
             },
-            timeout: 70000,
+            timeout: 120000,
           }
         );
-        transcribedText = response.data.text.trim();
-        success = true;
+
+        console.log(`Chunk ${i} API response:`, response.data);
+
+        if (response.status === 200 && response.data.text) {
+          transcribedText = response.data.text.trim();
+          success = true;
+        } else {
+          console.error(`Chunk ${i} API error: ${response.status} - ${response.data.error || response.data}`);
+        }
       } catch (error) {
-        if (
-          (error.response &&
-            (error.response.status === 429 || error.response.status === 503)) ||
-          error.message.includes("Model too busy")
-        ) {
-          console.warn(
-            `Retryable error for chunk ${i}: ${
-              error.response ? error.response.status : error.message
-            }, retrying (${retries} attempts left)...`
-          );
-          await new Promise((resolve) => setTimeout(resolve, 5000));
+        console.error(`Error transcribing chunk ${i}:`, error.response ? error.response.data : error.message);
+        if ((error.response && (error.response.status === 429 || error.response.status === 503)) || error.message.includes("Model too busy")) {
+          console.warn(`Retryable error for chunk ${i}, retrying (${retries} attempts left)...`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
           retries--;
         } else {
-          console.error(
-            `Error transcribing chunk ${i}:`,
-            error.response ? error.response.data : error.message
-          );
-          break; // Skip this chunk instead of sending error to frontend
+          break;
         }
       }
     }
@@ -312,44 +309,26 @@ app.post("/transcribe", authenticateToken, upload.single("audio"), async (req, r
       continue;
     }
 
-    if (transcribedText) {
-      transcriptions.push(transcribedText);
-    } else {
-      console.warn(`Chunk ${i} transcribed but returned empty text`);
-    }
+    if (transcribedText) transcriptions.push(transcribedText);
+    else console.warn(`Chunk ${i} transcribed but returned empty text`);
 
     const fullTranscription = transcriptions.join(" ").replace(/\s+/g, " ").trim();
     const progress = totalChunks > 0 ? ((i + 1) / totalChunks) * 100 : 0;
 
-    res.write(
-      `data: ${JSON.stringify({
-        currentTranscription: fullTranscription,
-        progress: Math.min(progress, 100),
-        status: "transcribing",
-      })}\n\n`
-    );
+    res.write(`data: ${JSON.stringify({
+      currentTranscription: fullTranscription,
+      progress: Math.min(progress, 100),
+      status: "transcribing",
+    })}\n\n`);
 
-    if (i < totalChunks - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1000)); // Reduced delay
-    }
+    if (i < totalChunks - 1) await new Promise(resolve => setTimeout(resolve, 1000));
   }
 
-  // Send final transcription
   const finalTranscription = transcriptions.join(" ").replace(/\s+/g, " ").trim();
-  if (!finalTranscription) {
-    res.write(`data: ${JSON.stringify({ error: "No transcription generated" })}\n\n`);
-  } else {
-    res.write(
-      `data: ${JSON.stringify({
-        finalTranscription,
-        progress: 100,
-        status: "completed",
-      })}\n\n`
-    );
-  }
+  if (!finalTranscription) res.write(`data: ${JSON.stringify({ error: "No transcription generated" })}\n\n`);
+  else res.write(`data: ${JSON.stringify({ finalTranscription, progress: 100, status: "completed" })}\n\n`);
   res.end();
 
-  // Clean up
   try {
     fs.unlinkSync(audioPath);
     fs.readdirSync(outputDir).forEach(file => fs.unlinkSync(path.join(outputDir, file)));
@@ -362,6 +341,7 @@ app.post("/transcribe", authenticateToken, upload.single("audio"), async (req, r
 // Generate file endpoint (protected)
 app.post("/generate-file", authenticateToken, async (req, res) => {
   const { text, format } = req.body;
+  console.log("Generate file request received:", { text, format }); // Log pour débogage
   if (!text || !format) {
     return res.status(400).json({ error: "Missing text or format" });
   }
@@ -371,13 +351,23 @@ app.post("/generate-file", authenticateToken, async (req, res) => {
   const execPromise = util.promisify(exec);
 
   try {
+    console.log("Executing Python script with:", `python generate_file.py "${text}" ${format}`);
     const { stdout, stderr } = await execPromise(
       `python generate_file.py "${text}" ${format}`,
       { encoding: 'utf8' }
     );
-    if (stderr) throw new Error(stderr);
+    console.log("Python script stdout:", stdout);
+    if (stderr) {
+      console.error("Python script stderr:", stderr);
+      throw new Error(stderr);
+    }
     const outputFile = stdout.trim();
+    console.log("Generated file path:", outputFile);
+    if (!fs.existsSync(outputFile)) {
+      throw new Error("Generated file not found");
+    }
     const fileUrl = `${BASE_URL}/downloads/${path.basename(outputFile)}`;
+    console.log("File URL:", fileUrl);
     res.json({ fileUrl });
   } catch (error) {
     console.error("File generation error:", error);
