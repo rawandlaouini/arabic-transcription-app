@@ -45,7 +45,7 @@ app.use("/downloads", express.static(path.join(__dirname, "downloads")));
 const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
 
 // Google Client ID (store in .env for production)
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "201334161885-7qktheuftruuk492deg3ugl2m0u0g61.apps.googleusercontent.com";
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "201334161885-7qktheuftruukg492deg3ugl2m0u0g61.apps.googleusercontent.com";
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // Base URL for the server (dynamic based on environment)
@@ -181,21 +181,20 @@ app.post("/google-login", async (req, res) => {
 
 // Transcribe endpoint with SSE (protected)
 app.post("/transcribe", authenticateToken, upload.single("audio"), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: "No audio file uploaded" });
+  }
+
+  const audioPath = req.file.path;
+  const outputDir = path.join(__dirname, "uploads", `chunks_${Date.now()}`);
+  fs.mkdirSync(outputDir);
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  // Split audio into 20-second chunks
   try {
-    if (!req.file) {
-      return res.status(400).write(`data: ${JSON.stringify({ error: "No audio file uploaded" })}\n\n`).end();
-    }
-
-    const audioPath = req.file.path;
-    const outputDir = path.join(__dirname, "uploads", `chunks_${Date.now()}`);
-    fs.mkdirSync(outputDir, { recursive: true });
-
-    // Set SSE headers
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-
-    // Split audio into 20-second chunks
     await new Promise((resolve, reject) => {
       ffmpeg(audioPath)
         .outputOptions([
@@ -217,22 +216,29 @@ app.post("/transcribe", authenticateToken, upload.single("audio"), async (req, r
         })
         .run();
     });
+  } catch (error) {
+    console.error("FFmpeg splitting failed:", error);
+    res.write(`data: ${JSON.stringify({ error: "Splitting error: " + error.message })}\n\n`);
+    return res.end();
+  }
 
-    const chunks = fs.readdirSync(outputDir).filter(file => file.endsWith(".mp3"));
-    const totalChunks = chunks.length;
-    console.log(`Total chunks generated: ${totalChunks}`);
+  const chunks = fs.readdirSync(outputDir).filter(file => file.endsWith(".mp3"));
+  const totalChunks = chunks.length;
+  let transcriptions = [];
 
-    if (totalChunks === 0) {
-      return res.write(`data: ${JSON.stringify({ error: "No chunks generated" })}\n\n`).end();
-    }
+  if (totalChunks === 0) {
+    res.write(`data: ${JSON.stringify({ error: "No chunks generated" })}\n\n`);
+    return res.end();
+  }
 
-    let fullTranscription = "";
-    let progress = 0;
+  console.log(`Total chunks generated: ${totalChunks}`);
 
-    for (let i = 0; i < totalChunks; i++) {
-      const chunkPath = path.join(outputDir, chunks[i]);
+  // Transcribe each chunk with the Colab API
+  for (let i = 0; i < totalChunks; i++) {
+    const chunkPath = path.join(outputDir, chunks[i]);
+
+    try {
       const stats = fs.statSync(chunkPath);
-
       if (stats.size < 1000) {
         console.warn(`Chunk ${i} is too small (${stats.size} bytes), skipping...`);
         continue;
@@ -248,99 +254,94 @@ app.post("/transcribe", authenticateToken, upload.single("audio"), async (req, r
             resolve();
           }
         });
-      }).catch(() => {});
+      });
+    } catch (error) {
+      console.warn(`Skipping chunk ${i} due to validation error: ${error.message}`);
+      continue;
+    }
 
-      let retries = 5;
-      let success = false;
-      let transcribedText = "";
+    let retries = 5;
+    let success = false;
+    let transcribedText = "";
 
-      while (retries > 0 && !success) {
-        try {
-          const audioData = fs.readFileSync(chunkPath);
-          console.log(`Chunk ${i} audio data length: ${audioData.length} bytes`);
+    while (retries > 0 && !success) {
+      try {
+        const audioData = fs.readFileSync(chunkPath);
+        console.log(`Chunk ${i} audio data length: ${audioData.length} bytes`);
 
-          const form = new FormData();
-          form.append("audio", audioData, { filename: `chunk_${i}.mp3`, contentType: "audio/mpeg" });
+        const FormData = require('form-data');
+        const form = new FormData();
+        form.append('audio', audioData, { filename: `chunk_${i}.mp3`, contentType: 'audio/mpeg' });
 
-          const response = await axios.post(
-            process.env.NGROK_URL,
-            form,
-            {
-              headers: { ...form.getHeaders() },
-              timeout: 120000,
-            }
-          );
-
-          console.log(`Chunk ${i} API response:`, response.data);
-
-          if (response.status === 200 && response.data.text) {
-            transcribedText = response.data.text.trim();
-            success = true;
-          } else {
-            console.error(`Chunk ${i} API error: ${response.status} - ${response.data.error || response.data}`);
+        const response = await axios.post(
+          process.env.NGROK_URL,
+          form,
+          {
+            headers: {
+              ...form.getHeaders(),
+            },
+            timeout: 120000,
           }
-        } catch (error) {
-          console.error(`Error transcribing chunk ${i}:`, error.response ? error.response.data : error.message);
-          if ((error.response && (error.response.status === 429 || error.response.status === 503)) || error.message.includes("Model too busy")) {
-            console.warn(`Retryable error for chunk ${i}, retrying (${retries} attempts left)...`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            retries--;
-          } else {
-            break;
-          }
+        );
+
+        console.log(`Chunk ${i} API response:`, response.data);
+
+        if (response.status === 200 && response.data.text) {
+          transcribedText = response.data.text.trim();
+          success = true;
+        } else {
+          console.error(`Chunk ${i} API error: ${response.status} - ${response.data.error || response.data}`);
+        }
+      } catch (error) {
+        console.error(`Error transcribing chunk ${i}:`, error.response ? error.response.data : error.message);
+        if ((error.response && (error.response.status === 429 || error.response.status === 503)) || error.message.includes("Model too busy")) {
+          console.warn(`Retryable error for chunk ${i}, retrying (${retries} attempts left)...`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          retries--;
+        } else {
+          break;
         }
       }
-
-      if (!success || !transcribedText) {
-        console.warn(`Skipping chunk ${i} due to transcription failure`);
-        continue;
-      }
-
-      fullTranscription += transcribedText + " ";
-      progress = Math.round(((i + 1) / totalChunks) * 100);
-
-      res.write(`data: ${JSON.stringify({
-        currentTranscription: transcribedText,
-        progress: progress,
-        status: i === totalChunks - 1 ? "completed" : "transcribing",
-      })}\n\n`);
-
-      if (i < totalChunks - 1) await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
-    if (!fullTranscription.trim()) {
-      res.write(`data: ${JSON.stringify({ error: "No transcription generated" })}\n\n`);
-    } else {
-      res.write(`data: ${JSON.stringify({
-        finalTranscription: fullTranscription.trim(),
-        progress: 100,
-        status: "completed",
-      })}\n\n`);
+    if (!success) {
+      console.warn(`Skipping chunk ${i} after exhausting retries`);
+      continue;
     }
-    res.end();
 
+    if (transcribedText) transcriptions.push(transcribedText);
+    else console.warn(`Chunk ${i} transcribed but returned empty text`);
+
+    const fullTranscription = transcriptions.join(" ").replace(/\s+/g, " ").trim();
+    const progress = totalChunks > 0 ? ((i + 1) / totalChunks) * 100 : 0;
+
+    res.write(`data: ${JSON.stringify({
+      currentTranscription: fullTranscription,
+      progress: Math.min(progress, 100),
+      status: "transcribing",
+    })}\n\n`);
+
+    if (i < totalChunks - 1) await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+
+  const finalTranscription = transcriptions.join(" ").replace(/\s+/g, " ").trim();
+  if (!finalTranscription) res.write(`data: ${JSON.stringify({ error: "No transcription generated" })}\n\n`);
+  else res.write(`data: ${JSON.stringify({ finalTranscription, progress: 100, status: "completed" })}\n\n`);
+  res.end();
+
+  try {
+    fs.unlinkSync(audioPath);
+    fs.readdirSync(outputDir).forEach(file => fs.unlinkSync(path.join(outputDir, file)));
+    fs.rmdirSync(outputDir);
   } catch (error) {
-    console.error("Transcription error:", error);
-    res.write(`data: ${JSON.stringify({ error: "Transcription error: " + error.message })}\n\n`);
-    res.end();
-  } finally {
-    // Cleanup files
-    try {
-      if (req.file) fs.unlinkSync(req.file.path);
-      if (fs.existsSync(outputDir)) {
-        fs.readdirSync(outputDir).forEach(file => fs.unlinkSync(path.join(outputDir, file)));
-        fs.rmdirSync(outputDir);
-      }
-    } catch (cleanupError) {
-      console.error("Cleanup error:", cleanupError);
-    }
+    console.error("Cleanup error:", error);
   }
 });
 
 // Generate file endpoint (protected)
 app.post("/generate-file", authenticateToken, async (req, res) => {
   const { text, format } = req.body;
-  console.log("Generate file request received:", { text, format });
+  console.log("Generate file request received:", { text, format }); // Log pour débogage
   if (!text || !format) {
     return res.status(400).json({ error: "Missing text or format" });
   }
@@ -376,8 +377,4 @@ app.post("/generate-file", authenticateToken, async (req, res) => {
 
 app.listen(8000, () => {
   console.log("Backend server running on http://localhost:8000");
-  db.run("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, password TEXT)", (err) => {
-    if (err) console.error("Database error:", err);
-    else console.log("Connected to SQLite database");
-  });
 });
