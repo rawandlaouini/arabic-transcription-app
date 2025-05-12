@@ -62,7 +62,7 @@
     };
 
     // AudioPlayer Component
-    const AudioPlayer = ({ audioFile, isPlaying, onEnd }) => {
+    const AudioPlayer = ({ audioFile, isPlaying }) => {
       const audioRef = useRef(null);
       const [audioUrl, setAudioUrl] = useState(null);
 
@@ -70,18 +70,21 @@
         if (audioFile) {
           const url = URL.createObjectURL(audioFile);
           setAudioUrl(url);
+          console.log("Audio URL created:", url);
           return () => URL.revokeObjectURL(url);
         }
       }, [audioFile]);
 
       useEffect(() => {
-        if (isPlaying && audioRef.current) {
-          audioRef.current.play().catch(err => console.error("Audio play error:", err));
+        if (isPlaying && audioRef.current && audioUrl) {
+          console.log("Attempting to play audio...");
+          audioRef.current.play().then(() => console.log("Audio playing")).catch(err => console.error("Play error:", err));
         } else if (!isPlaying && audioRef.current) {
           audioRef.current.pause();
           audioRef.current.currentTime = 0;
+          console.log("Audio paused and reset");
         }
-      }, [isPlaying]);
+      }, [isPlaying, audioUrl]);
 
       return audioUrl ? (
         <div className="mt-4">
@@ -90,7 +93,6 @@
             ref={audioRef}
             controls
             className="w-full border border-[#EDEDED] rounded-xl shadow-md"
-            onEnded={onEnd}
           >
             <source src={audioUrl} type="audio/mpeg" />
             Your browser does not support the audio element.
@@ -277,7 +279,7 @@
           <div className="flex flex-col md:flex-row gap-6">
             <div className="md:w-1/3 flex flex-col">
               <AudioUploader onFileSelect={setAudioFile} />
-              <AudioPlayer audioFile={audioFile} isPlaying={isTranscribing && isPlaying} onEnd={() => setIsPlaying(false)} />
+              <AudioPlayer audioFile={audioFile} isPlaying={isTranscribing && isPlaying} />
               <TranscribeButton onClick={handleTranscribe} disabled={!audioFile || isTranscribing} />
             </div>
             <div className="md:w-2/3 flex flex-col">
@@ -299,7 +301,7 @@
     };
 
     // Render the App
-    ReactDOM.render(<App />, document.getElementById('root'));
+    ReactDOM.render(<App />, document.getElementId('root'));
   </script>
 </body>
 </html>
