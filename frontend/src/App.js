@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import AudioUploader from "./components/AudioUploader";
 import TranscriptionTextArea from "./components/TranscriptionTextArea";
 import OutputFormatDropdown from "./components/OutputFormatDropdown";
@@ -8,6 +8,46 @@ import ProgressBar from "./components/ProgressBar";
 import StatusMessage from "./components/StatusMessage";
 import { GoogleOAuthProvider, GoogleLogin } from "@react-oauth/google";
 import axios from "axios";
+
+// AudioPlayer Component
+const AudioPlayer = ({ audioFile, isPlaying }) => {
+  const audioRef = useRef(null);
+  const [audioUrl, setAudioUrl] = useState(null);
+
+  useEffect(() => {
+    if (audioFile) {
+      const url = URL.createObjectURL(audioFile);
+      setAudioUrl(url);
+      console.log("Audio URL created:", url);
+      return () => URL.revokeObjectURL(url);
+    }
+  }, [audioFile]);
+
+  useEffect(() => {
+    if (isPlaying && audioRef.current && audioUrl) {
+      console.log("Attempting to play audio...");
+      audioRef.current.play().catch((err) => console.error("Play error:", err));
+    } else if (!isPlaying && audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      console.log("Audio paused and reset");
+    }
+  }, [isPlaying, audioUrl]);
+
+  return audioUrl ? (
+    <div className="mt-4">
+      <label className="mb-2 font-medium text-gray-700">Listen to Audio 🎧</label>
+      <audio
+        ref={audioRef}
+        controls
+        className="w-full border border-gray-300 rounded-xl shadow-md"
+      >
+        <source src={audioUrl} type="audio/mpeg" />
+        Your browser does not support the audio element.
+      </audio>
+    </div>
+  ) : null;
+};
 
 function App() {
   const [audioFile, setAudioFile] = useState(null);
@@ -22,6 +62,7 @@ function App() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isSignup, setIsSignup] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false); // New state for audio control
 
   const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
 
@@ -95,6 +136,7 @@ function App() {
     setEditableTranscription("");
     setProgress(0);
     setFileUrl("");
+    setIsPlaying(false); // Reset playback on new file
   };
 
   const handleFormatChange = (value) => {
@@ -111,6 +153,7 @@ function App() {
     setTranscription("");
     setEditableTranscription("");
     setProgress(0);
+    setIsPlaying(false); // Stop playback during transcription
 
     const formData = new FormData();
     formData.append("audio", audioFile);
@@ -204,6 +247,10 @@ function App() {
     }
   };
 
+  const handlePlayToggle = () => {
+    setIsPlaying(!isPlaying);
+  };
+
   if (!token) {
     return (
       <GoogleOAuthProvider clientId="201334161885-7qktheuftruukg492deg3ugl2m0u0g61.apps.googleusercontent.com">
@@ -274,6 +321,14 @@ function App() {
         <div className="flex flex-col md:flex-row gap-6">
           <div className="md:w-1/3 flex flex-col gap-4">
             <AudioUploader onFileSelect={handleFileChange} />
+            <AudioPlayer audioFile={audioFile} isPlaying={isPlaying} />
+            <button
+              onClick={handlePlayToggle}
+              className="bg-pink-400 text-white py-2 px-4 rounded-xl hover:bg-pink-500 disabled:bg-gray-300 transition-all"
+              disabled={!audioFile}
+            >
+              {isPlaying ? "Pause" : "Play"}
+            </button>
             <button
               onClick={handleTranscribe}
               disabled={isTranscribing || !audioFile}
